@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import {
   FaFileCsv, FaFilePdf, FaFilter, FaSync, FaChartBar,
-  FaVirus, FaHeartbeat, FaUsers, FaCalendarAlt,
 } from "react-icons/fa";
 import PageHeader from "../../components/admin/PageHeader";
 
@@ -124,21 +123,7 @@ const PRIORITY_STYLES = {
   "Low priority":       { bar: "#10b981", badge: "bg-emerald-50 text-emerald-700 border-emerald-200" },
 };
 
-/* ─── stat mini-card ─────────────────────────────────────── */
-const StatCard = ({ label, value, sub, Icon, accent = "text-health-blue", bg = "bg-health-ice/50" }) => (
-  <div className="admin-card p-4 flex items-start gap-3">
-    {Icon && (
-      <div className={`w-9 h-9 rounded-xl ${bg} flex items-center justify-center shrink-0`}>
-        <Icon className={`${accent} text-sm`} />
-      </div>
-    )}
-    <div className="min-w-0">
-      <p className="text-[10px] text-gray-400 uppercase tracking-wide">{label}</p>
-      <p className="text-xl font-bold text-health-navy mt-0.5">{value}</p>
-      {sub && <p className="text-[10px] text-gray-400 mt-0.5">{sub}</p>}
-    </div>
-  </div>
-);
+
 
 /* ─── report type configs ─────────────────────────────────── */
 const REPORT_TYPES = [
@@ -187,13 +172,13 @@ const Reports = () => {
   useEffect(() => { loadData(); }, [loadData]);
 
   /* ── date-range helper ── */
-  const inRange = (dateStr) => {
+  const inRange = useCallback((dateStr) => {
     if (!dateStr) return true;
     const d = new Date(dateStr);
     if (dateFrom && d < new Date(dateFrom)) return false;
     if (dateTo   && d > new Date(dateTo + "T23:59:59")) return false;
     return true;
-  };
+  }, [dateFrom, dateTo]);
 
   /* ── derived: patient list rows ── */
   const patientRows = useMemo(() => {
@@ -214,7 +199,7 @@ const Reports = () => {
       fmtDate(p.lastVisit),
       fmtDate(p.createdAt),
     ]);
-  }, [patients, dateFrom, dateTo, search]);
+  }, [patients, search, inRange]);
 
   /* ── derived: visit rows ── */
   const visitRows = useMemo(() => {
@@ -249,7 +234,7 @@ const Reports = () => {
       });
     });
     return out.sort((a, b) => new Date(b[0]) - new Date(a[0]));
-  }, [fullPts, dateFrom, dateTo, search]);
+  }, [fullPts, search, inRange]);
 
   /* ── derived: staff rows ── */
   const staffRows = useMemo(() => {
@@ -265,7 +250,7 @@ const Reports = () => {
       fmtDateTime(s.lastLogin),
       fmtDate(s.createdAt),
     ]);
-  }, [staff, dateFrom, dateTo, search]);
+  }, [staff, search, inRange]);
 
   /* ── derived: STATISTICS ── */
   const stats = useMemo(() => {
@@ -416,7 +401,7 @@ const Reports = () => {
       byMonth,
       diseaseSymptomProfile,
     };
-  }, [fullPts, dateFrom, dateTo]);
+  }, [fullPts, inRange]);
 
   /* ── stats CSV export ── */
   const handleStatsCSV = () => {

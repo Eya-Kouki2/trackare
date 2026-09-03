@@ -1,10 +1,10 @@
 import api from "../../api/axios";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
-import { predictMaladies, getPriorityFromPrediction } from "../../utils/triagePredict";
+import { getPriorityFromPrediction } from "../../utils/triagePredict";
 import {
   FaExpand, FaCompress, FaPlus, FaMinus,
-  FaShieldAlt, FaRedo, FaCheckCircle, FaTimesCircle,
+  FaRedo, FaCheckCircle, FaTimesCircle,
   FaMicrophone, FaMicrophoneSlash,
 } from "react-icons/fa";
 
@@ -47,12 +47,6 @@ const QUESTIONS = [
 
 /* Pretty label from key */
 const fmt = (key) => key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
-/* ─── Build note string for predictMaladies from yes-answers ── */
-const buildNotes = (answers) =>
-  QUESTIONS.filter((q) => answers[q.key])
-    .flatMap((q) => q.keywords)
-    .join(" ");
 
 /* ══════════════════════════════════════════════════════════════ */
 
@@ -179,7 +173,7 @@ const DetectSickness = () => {
   });
 
   /* ── Process Prediction (Shared by manual form & kiosk) ─────── */
-  const processPrediction = async (mlPrediction, confidenceMap = null, reportedSymptoms = []) => {
+  const processPrediction = useCallback(async (mlPrediction, confidenceMap = null, reportedSymptoms = []) => {
     let maladieKey = "autre";
     let confidence = 100;
     let label = "Safe / No Disease Detected";
@@ -271,7 +265,7 @@ const DetectSickness = () => {
         console.error("Failed to increment room count:", err);
       }
     }
-  };
+  }, [diseaseClasses]);
 
   /* ── Answer a question (yes = true, no = false) ─────────────── */
   const answer = async (value) => {
@@ -371,7 +365,7 @@ const DetectSickness = () => {
     return () => {
       sse.close();
     };
-  }, [diseaseClasses]);
+  }, [processPrediction]);
 
   const restart = () => {
     isSubmittingRef.current = false;
@@ -455,7 +449,7 @@ const DetectSickness = () => {
                   <p className="text-sm text-slate-500 leading-relaxed">
                     This tool walks you through <strong className="text-slate-700">{QUESTIONS.length} clinical questions</strong>.
                     Answer <strong className="text-emerald-600">Yes</strong> or <strong className="text-red-500">No</strong> for each symptom —
-                    at the end you'll receive a diagnostic assessment and a suggested room if applicable.
+                    at the end you&apos;ll receive a diagnostic assessment and a suggested room if applicable.
                   </p>
                 </div>
 

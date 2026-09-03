@@ -515,7 +515,8 @@ if __name__ == "__main__":
     pipeline = PharmaceuticalScannerPipeline()
     
     # Configure path to your targeted test sample image file
-    target_medicine_scan = "test_images/amoxicillin_sample (4).jpg"
+    # Use an existing uploaded scan image from the uploads/ folder
+    target_medicine_scan = "uploads/scan_1783271289877.jpg"
     
     # Run pipeline verification loop
     pipeline.process_inventory_scan(target_medicine_scan)

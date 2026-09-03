@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import { Link } from "react-router-dom";
 import api from "../../api/axios";
@@ -18,7 +18,7 @@ const Alerts = () => {
     setNoRoomAlerts(stored);
   };
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (!user?.area) return;
     try {
       const [patientsRes, classesRes] = await Promise.all([
@@ -33,7 +33,7 @@ const Alerts = () => {
       setIsLoading(false);
     }
     loadNoRoomAlerts();
-  };
+  }, [user?.area]);
 
   useEffect(() => {
     loadData();
@@ -43,16 +43,16 @@ const Alerts = () => {
       clearInterval(intervalId);
       window.removeEventListener("alerts-updated", loadData);
     };
-  }, [user?.area]);
+  }, [loadData]);
 
-  const getPatientsInClass = (placeCode) => {
+  const getPatientsInClass = useCallback((placeCode) => {
     return patients.filter((p) => {
       if (!p.history || p.history.length === 0) return false;
       const sortedHistory = [...p.history].sort((a, b) => new Date(b.date) - new Date(a.date));
       const latestTriage = sortedHistory[0]?.triage;
       return latestTriage?.suggestedClass?.placeCode === Number(placeCode);
     });
-  };
+  }, [patients]);
 
   const fullRooms = useMemo(() => {
     return diseaseClasses.filter((room) => {
@@ -60,7 +60,7 @@ const Alerts = () => {
       const kioskPatients = room.currentPatients || 0;
       return (officialPatients + kioskPatients) >= (room.maxPatients || 1);
     });
-  }, [diseaseClasses, patients]);
+  }, [diseaseClasses, getPatientsInClass]);
 
   const handleDismiss = async (roomId) => {
     try {

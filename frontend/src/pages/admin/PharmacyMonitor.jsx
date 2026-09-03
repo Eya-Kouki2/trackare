@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import PageHeader from "../../components/admin/PageHeader";
 import api from "../../api/axios";
 import {
-  FaMicroscope, FaUpload, FaSpinner, FaCheckCircle,
+  FaUpload, FaSpinner, FaCheckCircle,
   FaTimesCircle, FaExclamationTriangle, FaSearch,
   FaTrash, FaFlask, FaCalendarAlt, FaPills, FaClipboardList,
 } from "react-icons/fa";
@@ -44,7 +44,7 @@ export default function PharmacyMonitor() {
     try {
       const saved = localStorage.getItem("pharmacyPendingScans");
       return saved ? JSON.parse(saved) : [];
-    } catch (e) {
+    } catch {
       return [];
     }
   });
@@ -142,7 +142,7 @@ export default function PharmacyMonitor() {
       await api.post("/api/pharmacy/accept", { medications: results });
       clearAll();
       fetchInventory();
-    } catch (err) {
+    } catch {
       setError("Failed to accept medications.");
     }
   };
@@ -152,7 +152,7 @@ export default function PharmacyMonitor() {
       await api.post("/api/pharmacy/accept", { medications: [row] });
       clearRow(row.id);
       fetchInventory();
-    } catch (err) {
+    } catch {
       setError(`Failed to accept ${row.drug_name}`);
     }
   };

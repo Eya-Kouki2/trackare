@@ -1,9 +1,9 @@
 import api from "../../api/axios";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useOutletContext, Link } from "react-router-dom";
 import {
   FaUsers, FaUserMd, FaExclamationTriangle, FaCog,
-  FaCheckCircle, FaBell, FaInfoCircle, FaPlus, FaClipboardList,
+  FaCheckCircle, FaPlus, FaClipboardList,
   FaChartLine, FaVirus, FaChevronRight, FaShieldAlt, FaCalendarAlt
 } from "react-icons/fa";
 import { getInitials } from "../../utils/getInitials";
@@ -125,33 +125,7 @@ const LineChart = ({ data, color = "#3b82f6", height = 180 }) => {
   );
 };
 
-/* ─── Tiny Sparkline for top cards ───────────────────────── */
-const TinySparkline = ({ data, color = "#10b981" }) => {
-  if (!data?.length) return <div className="h-6"></div>;
-  const max = Math.max(...data.map(d => d.count), 1);
-  const w = 60;
-  const h = 20;
-  const step = w / Math.max(data.length - 1, 1);
-  const pts = data.map((d, i) => `${i * step},${h - (d.count / max) * (h - 2) - 1}`).join(" ");
 
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible">
-      <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" points={pts} />
-    </svg>
-  );
-};
-
-/* ─── Mock Data Generators ─────────────────────────────── */
-const generateTrend = (points, upward = true) => {
-  const data = [];
-  let current = upward ? 2 : 10;
-  for (let i = 0; i < points; i++) {
-    data.push({ count: current });
-    current += Math.random() * 4 * (upward ? 1 : -1) + (Math.random() > 0.5 ? 2 : -2);
-    if (current < 1) current = 1;
-  }
-  return data;
-};
 
 /* ─── Main Component ───────────────────────────────────────── */
 const AdminHome = () => {
@@ -162,14 +136,14 @@ const AdminHome = () => {
   const [selectedClassForPatients, setSelectedClassForPatients] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const getPatientsInClass = (placeCode) => {
+  const getPatientsInClass = useCallback((placeCode) => {
     return patients.filter((p) => {
       if (!p.history || p.history.length === 0) return false;
       const sortedHistory = [...p.history].sort((a, b) => new Date(b.date) - new Date(a.date));
       const latestTriage = sortedHistory[0]?.triage;
       return latestTriage?.suggestedClass?.placeCode === Number(placeCode);
     });
-  };
+  }, [patients]);
 
   const area = user?.area;
   const basePath = user?.role === "nurses" ? "/nurse" : "/admin";
@@ -210,7 +184,6 @@ const AdminHome = () => {
     let totalTriage = 0;
     let todayTriageCount = 0;
     let highRiskCount = 0;
-    const diseaseCounts = {};
     const weeklyVisits = {};
     const recentTriages = [];
     const today = new Date().toDateString();
@@ -318,7 +291,7 @@ const AdminHome = () => {
       const kioskPatients = room.currentPatients || 0;
       return (officialPatients + kioskPatients) >= (room.maxPatients || 1);
     });
-  }, [diseaseClasses, patients]);
+  }, [diseaseClasses, getPatientsInClass]);
 
   if (!area) {
     return (
@@ -337,7 +310,7 @@ const AdminHome = () => {
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-4">
         <div>
           <h1 className="text-[26px] font-black text-health-navy tracking-tight leading-none mb-1.5">Dashboard</h1>
-          <p className="text-xs text-slate-500 font-medium">Welcome back, Admin! Here's what's happening today.</p>
+          <p className="text-xs text-slate-500 font-medium">Welcome back, Admin! Here&apos;s what&apos;s happening today.</p>
         </div>
         <div className="flex items-stretch gap-3">
           <Link to="/admin/alerts" className={`relative flex items-center justify-center gap-2 px-5 h-12 border rounded-xl transition-all shadow-sm font-bold text-sm ${fullRooms.length > 0 ? 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>

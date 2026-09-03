@@ -1,5 +1,5 @@
 import api from "../../api/axios";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { FaEdit, FaPlus, FaTimes, FaTrash } from "react-icons/fa";
 import PageHeader from "../../components/admin/PageHeader";
@@ -242,11 +242,11 @@ const Patients = () => {
     });
   };
 
-  const cancelDeletePatient = () => {
+  const cancelDeletePatient = useCallback(() => {
     if (isDeletingPatient) return;
     setPatientToDelete(null);
     setDeleteError(null);
-  };
+  }, [isDeletingPatient]);
 
   const confirmDeletePatient = async () => {
     if (!patientToDelete) return;
@@ -330,7 +330,7 @@ const Patients = () => {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [patientToDelete, isDeletingPatient]);
+  }, [patientToDelete, cancelDeletePatient]);
 
   useEffect(() => {
     if (!selectedPatient && !isLoadingPatient) return;

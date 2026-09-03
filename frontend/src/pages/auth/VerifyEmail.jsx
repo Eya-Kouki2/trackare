@@ -1,7 +1,7 @@
 import api from "../../api/axios";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { FaEnvelope, FaShieldAlt } from "react-icons/fa";
+import { FaShieldAlt } from "react-icons/fa";
 import AuthLayout from "../../components/auth/AuthLayout";
 import AuthAlert from "../../components/auth/AuthAlert";
 import AuthInput from "../../components/auth/AuthInput";

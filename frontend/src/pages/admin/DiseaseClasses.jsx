@@ -150,7 +150,7 @@ const DiseaseClasses = () => {
           <p className="text-2xl font-bold text-health-navy">{classes.length}</p>
           <p className="text-[10px] text-slate-400 mt-0.5">disease rooms</p>
         </div>
-        {SEVERITY_OPTIONS.map(({ value, label, badge, dot }) => (
+        {SEVERITY_OPTIONS.map(({ value, label, dot }) => (
           <div key={value} className="admin-card px-4 py-4">
             <p className="section-header mb-1">{label}</p>
             <div className="flex items-center gap-2 mt-1">

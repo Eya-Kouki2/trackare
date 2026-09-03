@@ -1,4 +1,4 @@
-import { MALADIES, getMaladieLabel } from "../constants/maladies";
+import { getMaladieLabel } from "../constants/maladies";
 
 const SYMPTOM_RULES = [
   { keywords: ["fever", "fièvre", "cough", "toux", "fatigue", "body ache"], maladie: "grippe", weight: 3 },

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { FaCopy, FaCheck, FaSignOutAlt } from "react-icons/fa";
 import api from "../../api/axios";
@@ -44,7 +44,7 @@ const Sidebar = ({ user, onLogout, role = "admin" }) => {
           if (official + kiosk >= (room.maxPatients || 1)) count++;
         });
         setAlertCount(count + (JSON.parse(localStorage.getItem("noRoomAlerts") || "[]")).length);
-      } catch (e) {
+      } catch {
         // ignore errors silently
       }
     };

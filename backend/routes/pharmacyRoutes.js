@@ -98,7 +98,12 @@ router.post('/scan', upload.single('image'), (req, res) => {
         }
         try {
             // Find the last JSON object in the stdout string
-            const jsonStr = dataString.substring(dataString.indexOf('{'));
+            const jsonStart = dataString.indexOf('{');
+            if (jsonStart === -1) {
+                console.error('No JSON object found in pharmacy scan output:', dataString);
+                return res.status(500).json({ error: 'No JSON output from scan model', raw: dataString });
+            }
+            const jsonStr = dataString.substring(jsonStart);
             const result = JSON.parse(jsonStr);
             
             if (result.error) return res.status(500).json({ error: result.error });

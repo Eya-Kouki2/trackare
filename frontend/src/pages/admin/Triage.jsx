@@ -59,8 +59,6 @@ const Triage = () => {
   const { user } = useOutletContext();
   const navigate = useNavigate();
   const [patients, setPatients] = useState([]);
-  const [fullPts, setFullPts] = useState([]);       // stats endpoint: full history
-  const [diseaseClasses, setDiseaseClasses] = useState([]);
   const [patientForm, setPatientForm] = useState(emptyPatientForm);
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [isExistingPatient, setIsExistingPatient] = useState(false);
@@ -79,14 +77,8 @@ const Triage = () => {
     if (!user?.area) return;
     const load = async () => {
       try {
-        const [patientsRes, classesRes, statsRes] = await Promise.all([
-          api.get("/api/patients"),
-          api.get("/api/disease-classes"),
-          api.get("/api/patients/stats"),
-        ]);
+        const patientsRes = await api.get("/api/patients");
         setPatients(patientsRes.data.patients);
-        setDiseaseClasses(classesRes.data.diseaseClasses);
-        setFullPts(statsRes.data.patients || []);
       } catch (error) {
         setErrorMessage(error.response?.data?.message || "Failed to load triage data.");
       }
