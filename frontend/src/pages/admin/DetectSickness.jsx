@@ -2,6 +2,7 @@ import api from "../../api/axios";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import { getPriorityFromPrediction } from "../../utils/triagePredict";
+import { getMaladieLabel } from "../../constants/maladies";
 import {
   FaExpand, FaCompress, FaPlus, FaMinus,
   FaRedo, FaCheckCircle, FaTimesCircle,
@@ -62,6 +63,9 @@ const DetectSickness = () => {
   const [sliding, setSliding] = useState(false);   // animation flag
   const isSubmittingRef = useRef(false);            // prevents double-increment
   const [allRoomsFull, setAllRoomsFull] = useState(false); // all matching rooms full
+  const [sessionId, setSessionId] = useState(null);        // backend triage session id
+  const [tokenNumber, setTokenNumber] = useState(null);    // backend atomic token number (e.g. 001)
+  const [assignedRoomLive, setAssignedRoomLive] = useState(null); // room assigned via SSE
   const [voiceMode, setVoiceMode] = useState(false);       // voice recognition active
   const [listening, setListening] = useState(false);       // mic currently listening
   const [voiceStatus, setVoiceStatus] = useState("");      // feedback text
@@ -210,35 +214,41 @@ const DetectSickness = () => {
     const preds = [{ maladie: maladieKey, label: label, confidence: confidence }];
     const priority = getPriorityFromPrediction(confidence);
     
-    // Find all rooms matching the sickness
-    const matchingRooms = currentDiseaseClasses.filter((c) => c.maladie === maladieKey);
-
-    // Helper: compute total occupancy for a room (official + kiosk queue)
-    const getTotalOccupancy = (room) => {
-      const officialCount = currentPatients.filter((p) => {
-        if (!p.history || p.history.length === 0) return false;
-        const sortedHistory = [...p.history].sort((a, b) => new Date(b.date) - new Date(a.date));
-        return sortedHistory[0]?.triage?.suggestedClass?.placeCode === Number(room.placeCode);
-      }).length;
-      return officialCount + (room.currentPatients || 0);
+    // Helper for robust sickness string matching
+    const isMaladieMatch = (m1, m2) => {
+      if (!m1 || !m2) return false;
+      const s1 = String(m1).toLowerCase().trim();
+      const s2 = String(m2).toLowerCase().trim();
+      if (s1 === s2) return true;
+      if ((s1.includes("tuber") && s2.includes("tuber")) ||
+          (s1.includes("aid") && s2.includes("cid")) ||
+          (s1.includes("cid") && s2.includes("aid"))) {
+        return true;
+      }
+      return false;
     };
 
-    // Find the FIRST room with available capacity
+    // Find all rooms matching the diagnosed sickness
+    const matchingRooms = currentDiseaseClasses.filter((c) => isMaladieMatch(c.maladie, maladieKey));
+
+    // Search for ANY matching room that still has available capacity
     let matched = null;
     for (const room of matchingRooms) {
-      if (getTotalOccupancy(room) < (room.maxPatients || 1)) {
+      const roomCapacity = room.maxPatients || 1;
+      const currentOccupancy = room.currentPatients || 0;
+      if (currentOccupancy < roomCapacity) {
         matched = room;
         break;
       }
     }
 
-    // All rooms full if we found matching rooms but none had capacity
-    const allFull = matchingRooms.length > 0 && matched === null;
+    // Only set unavailable if EVERY room for this sickness is completely full (or 0 rooms exist)
+    const isRoomUnavailable = matched === null && maladieKey !== "autre";
 
-    // If all rooms full, store a dashboard alert in localStorage
-    if (allFull && maladieKey !== "autre") {
+    // If all rooms for this sickness are full, store a dashboard alert
+    if (isRoomUnavailable) {
       const noRoomAlerts = JSON.parse(localStorage.getItem("noRoomAlerts") || "[]");
-      const alreadyExists = noRoomAlerts.some((a) => a.maladie === maladieKey);
+      const alreadyExists = noRoomAlerts.some((a) => isMaladieMatch(a.maladie, maladieKey));
       if (!alreadyExists) {
         noRoomAlerts.push({
           id: Date.now(),
@@ -251,21 +261,32 @@ const DetectSickness = () => {
       window.dispatchEvent(new Event("alerts-updated"));
     }
 
-    setAllRoomsFull(allFull && maladieKey !== "autre");
+    setAllRoomsFull(isRoomUnavailable);
 
     setResults({ predictions: preds, priority, matchedClass: matched, yesKeys: reportedSymptoms });
     setView("results");
 
-    // Only increment if we found an available room (never overfill)
-    if (matched) {
-      try {
-        await api.post(`/api/disease-classes/${matched._id}/increment`);
-        window.dispatchEvent(new Event("alerts-updated"));
-      } catch (err) {
-        console.error("Failed to increment room count:", err);
+    // Create session in backend for Doctor queue
+    // The backend handles room increment atomically — do NOT call /increment separately
+    try {
+      const sessionRes = await api.post("/api/triage-sessions", {
+        areaId: user?.area?._id || user?.area,
+        symptoms: reportedSymptoms,
+        prediction: { maladie: maladieKey, label, confidence },
+        priority: priority?.level ? (priority.level === 'high' ? 'RED' : priority.level === 'moderate' ? 'YELLOW' : 'GREEN') : 'GREEN',
+      });
+      if (sessionRes.data?.sessionId) {
+        setSessionId(sessionRes.data.sessionId);
       }
+      if (sessionRes.data?.tokenNumber) {
+        setTokenNumber(sessionRes.data.tokenNumber);
+      }
+      // Trigger alerts panel refresh
+      window.dispatchEvent(new Event("alerts-updated"));
+    } catch (err) {
+      console.error("Failed to create triage session:", err);
     }
-  }, [diseaseClasses]);
+  }, [diseaseClasses, user?.area]);
 
   /* ── Answer a question (yes = true, no = false) ─────────────── */
   const answer = async (value) => {
@@ -357,6 +378,16 @@ const DetectSickness = () => {
           await processPrediction(prediction, confidence, symptoms_reported || []);
         }
 
+        // ── Patient promoted from waiting to an assigned room ─────
+        if (data.type === 'WAITING_PATIENT_ASSIGNED' && data.payload) {
+          setAssignedRoomLive({
+            placeCode: data.payload.placeCode,
+            name: data.payload.roomName,
+            maladie: data.payload.maladie,
+          });
+          setAllRoomsFull(false);
+        }
+
       } catch (err) {
         console.error("Error parsing Kiosk SSE data", err);
       }
@@ -367,9 +398,69 @@ const DetectSickness = () => {
     };
   }, [processPrediction]);
 
+  /* ── Fallback Polling for Waiting Patient ─────────────────────── */
+  useEffect(() => {
+    if (!allRoomsFull) return;
+    const maladieKey = results?.predictions?.[0]?.maladie;
+
+    const pollStatus = async () => {
+      try {
+        // 1. Check if session was updated in backend
+        if (sessionId) {
+          const sessionRes = await api.get(`/api/triage-sessions/${sessionId}`);
+          const sess = sessionRes.data?.session;
+          if (sess) {
+            if (sess.tokenNumber) setTokenNumber(sess.tokenNumber);
+            if (sess.status === "assigned" || sess.assignedRoom || sess.suggestedClass) {
+              const room = sess.assignedRoom || sess.suggestedClass;
+              if (room?.placeCode) {
+                setAssignedRoomLive({
+                  placeCode: room.placeCode,
+                  name: room.name || `Room ${room.placeCode}`,
+                  maladie: sess.prediction?.maladie || maladieKey,
+                });
+                setAllRoomsFull(false);
+                return;
+              }
+            }
+          }
+        }
+
+        // 2. Check if a new room was added for this sickness
+        if (maladieKey) {
+          const classesRes = await api.get("/api/disease-classes");
+          const diseaseClassesList = classesRes.data?.diseaseClasses || [];
+          const matchingAvailableRoom = diseaseClassesList.find(
+            (c) => (c.maladie === maladieKey || c.maladie?.toLowerCase() === maladieKey?.toLowerCase()) &&
+                   ((c.currentPatients || 0) < (c.maxPatients || 1))
+          );
+
+          if (matchingAvailableRoom) {
+            setAssignedRoomLive({
+              placeCode: matchingAvailableRoom.placeCode,
+              name: matchingAvailableRoom.description ? matchingAvailableRoom.description : `Room ${matchingAvailableRoom.placeCode}`,
+              maladie: matchingAvailableRoom.maladie,
+            });
+            setAllRoomsFull(false);
+          }
+        }
+      } catch (err) {
+        console.error("Error polling session waiting status:", err);
+      }
+    };
+
+    pollStatus();
+    const interval = setInterval(pollStatus, 1500);
+
+    return () => clearInterval(interval);
+  }, [allRoomsFull, sessionId, results]);
+
   const restart = () => {
     isSubmittingRef.current = false;
     setAllRoomsFull(false);
+    setSessionId(null);
+    setTokenNumber(null);
+    setAssignedRoomLive(null);
     setAnswers({});
     setCurrent(0);
     setResults(null);
@@ -629,74 +720,169 @@ const DetectSickness = () => {
 
         {/* ══ RESULTS ══════════════════════════════════════════ */}
         {view === "results" && results && (
-          <div className="flex flex-col gap-8 mt-4 animate-fade-in pb-12">
+          <div className="flex flex-col gap-6 mt-4 animate-fade-in pb-12">
             
-            {/* 1. PREDICTION CARD */}
-            <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden p-8 sm:p-12">
-              <div className="flex items-center justify-between mb-6">
-                <span className="text-3xl sm:text-4xl font-black text-[#03045e]">
-                  🥇 {results.predictions[0].label}
-                </span>
-                <span className="text-3xl sm:text-4xl font-black text-[#0077b6]">
-                  {results.predictions[0].confidence}%
+            {/* ── UNIFIED TICKET PASS (HERO BOARDING PASS LAYOUT) ── */}
+            <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-xl overflow-hidden">
+              {/* Top Header Strip */}
+              <div 
+                className="px-6 sm:px-8 py-4 text-white flex items-center justify-between"
+                style={{ background: "linear-gradient(135deg, #03045e, #0077b6)" }}
+              >
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl">🩺</span>
+                  <span className="text-xs sm:text-sm font-bold uppercase tracking-widest text-blue-100">
+                    Patient Triage Pass & Room Ticket
+                  </span>
+                </div>
+                <span className={`text-xs font-extrabold px-3.5 py-1 rounded-full border shadow-sm ${
+                  assignedRoomLive || results.matchedClass
+                    ? "bg-emerald-500/20 border-emerald-300 text-emerald-200"
+                    : "bg-amber-500/20 border-amber-300 text-amber-200"
+                }`}>
+                  {assignedRoomLive || results.matchedClass ? "✓ Room Assigned" : "⏳ In Buffer Queue"}
                 </span>
               </div>
-              
-              <div className="w-full bg-slate-100 rounded-full h-6 overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-1000 ease-out"
-                  style={{
-                    width: `${results.predictions[0].confidence}%`,
-                    background: "linear-gradient(90deg,#03045e,#0096c7)",
-                  }}
-                />
-              </div>
-            </div>
 
-            {/* 2. ROOM SUGGESTION CARD */}
-            <div className="bg-white rounded-3xl border-2 border-slate-100 shadow-sm overflow-hidden flex flex-col relative h-full">
-              <div className="absolute top-0 left-0 right-0 h-3" style={{ background: "linear-gradient(90deg,#03045e,#0096c7)" }} />
-              
-              <div className="p-8 sm:p-12 text-center flex-1 flex flex-col justify-center mt-4">
-                {results.matchedClass ? (
-                  <div className="space-y-6">
-                    <p className="text-xl sm:text-2xl font-bold uppercase tracking-widest text-slate-400">
-                      Proceed to Room
+              {/* Main Ticket Grid: Token + Room Side-by-Side */}
+              <div className="p-6 sm:p-10 grid grid-cols-1 md:grid-cols-2 gap-6 items-center border-b border-slate-100">
+                
+                {/* Left Side: TOKEN NUMBER */}
+                <div className="flex items-center gap-5 bg-gradient-to-br from-indigo-50/80 to-blue-50/40 rounded-2xl p-6 border border-indigo-100 shadow-inner">
+                  <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white flex items-center justify-center text-3xl shrink-0 shadow-md">
+                    🎫
+                  </div>
+                  <div>
+                    <p className="text-xs font-extrabold uppercase tracking-widest text-indigo-400 mb-0.5">
+                      Your Queue Token
                     </p>
-                    <p className="text-7xl sm:text-9xl font-black text-[#0077b6] drop-shadow-sm">
-                      #{results.matchedClass.placeCode}
-                    </p>
-                    <p className="text-2xl font-bold text-slate-600 mt-6">
-                      {results.matchedClass.maladie ? `${results.matchedClass.maladie.charAt(0).toUpperCase() + results.matchedClass.maladie.slice(1)} — Class ${results.matchedClass.classNumber || 1}` : `Room ${results.matchedClass.placeCode}`}
+                    <h2 className="text-5xl sm:text-6xl font-black text-[#03045e] tracking-tight">
+                      #{tokenNumber || "001"}
+                    </h2>
+                    <p className="text-xs font-semibold text-indigo-600/90 mt-1">
+                      Keep this token number for medical staff
                     </p>
                   </div>
-                ) : allRoomsFull ? (
-                  <div className="space-y-6">
-                    <span className="text-6xl sm:text-8xl">🚫</span>
-                    <p className="text-3xl sm:text-4xl font-black text-red-500 drop-shadow-sm">
-                      No Room Available
+                </div>
+
+                {/* Right Side: ROOM ASSIGNMENT */}
+                <div className={`flex items-center gap-5 rounded-2xl p-6 border shadow-inner ${
+                  assignedRoomLive || results.matchedClass
+                    ? "bg-gradient-to-br from-emerald-50 to-teal-50/40 border-emerald-200"
+                    : "bg-gradient-to-br from-amber-50 to-orange-50/40 border-amber-200"
+                }`}>
+                  <div className={`w-16 h-16 rounded-2xl flex items-center justify-center text-3xl shrink-0 shadow-md ${
+                    assignedRoomLive || results.matchedClass
+                      ? "bg-emerald-600 text-white"
+                      : "bg-amber-500 text-white"
+                  }`}>
+                    {assignedRoomLive || results.matchedClass ? "📍" : "⏳"}
+                  </div>
+                  <div>
+                    <p className="text-xs font-extrabold uppercase tracking-widest text-slate-400 mb-0.5">
+                      {assignedRoomLive || results.matchedClass ? "Proceed to Room" : "Room Assignment"}
                     </p>
-                    <p className="text-base text-slate-500 leading-relaxed">
-                      All rooms for this condition are currently at full capacity.
-                    </p>
-                    <div className="inline-flex items-center gap-2 bg-yellow-50 border border-yellow-200 text-yellow-700 rounded-xl px-5 py-3 text-sm font-semibold mt-4">
-                      🔔 Admin has been notified to add a new room
+                    {assignedRoomLive ? (
+                      <>
+                        <h2 className="text-5xl sm:text-6xl font-black text-emerald-600 tracking-tight">
+                          #{assignedRoomLive.placeCode}
+                        </h2>
+                        <p className="text-xs font-extrabold text-slate-600 mt-1">
+                          {assignedRoomLive.name}
+                        </p>
+                      </>
+                    ) : results.matchedClass ? (
+                      <>
+                        <h2 className="text-5xl sm:text-6xl font-black text-[#0077b6] tracking-tight">
+                          #{results.matchedClass.placeCode}
+                        </h2>
+                        <p className="text-xs font-extrabold text-slate-600 mt-1">
+                          {getMaladieLabel(results.matchedClass.maladie)} — Room #{results.matchedClass.placeCode}
+                        </p>
+                      </>
+                    ) : allRoomsFull ? (
+                      <>
+                        <h2 className="text-2xl sm:text-3xl font-black text-amber-600 tracking-tight">
+                          Please Wait…
+                        </h2>
+                        <p className="text-xs font-extrabold text-amber-700 mt-1">
+                          Admin notified · Assigning room shortly
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <h2 className="text-xl font-bold text-slate-400">
+                          Unassigned
+                        </h2>
+                        <p className="text-xs text-slate-500 mt-1">
+                          No room configured for this condition
+                        </p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Diagnostic Evaluation Section Inside Ticket */}
+              <div className="p-6 sm:p-10 bg-slate-50/50">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
+                  <div className="flex items-center gap-3">
+                    <span className="w-11 h-11 rounded-2xl bg-blue-100 text-[#0077b6] flex items-center justify-center text-xl font-bold border border-blue-200">
+                      🧬
+                    </span>
+                    <div>
+                      <p className="text-[10px] font-extrabold uppercase tracking-widest text-slate-400">
+                        Evaluated Condition
+                      </p>
+                      <h3 className="text-2xl sm:text-3xl font-black text-[#03045e]">
+                        {getMaladieLabel(results.predictions[0].maladie) || results.predictions[0].label}
+                      </h3>
                     </div>
                   </div>
-                ) : (
-                  <div className="space-y-6">
-                    <span className="text-6xl sm:text-8xl">🔍</span>
-                    <p className="text-2xl font-bold text-slate-400 leading-relaxed">
-                      No quarantine room is mapped to this condition.
-                    </p>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-extrabold text-slate-400 uppercase tracking-wider">Confidence:</span>
+                    <span className="text-2xl sm:text-3xl font-black text-[#0077b6] bg-blue-50 px-4 py-1 rounded-xl border border-blue-200">
+                      {results.predictions[0].confidence}%
+                    </span>
                   </div>
-                )}
+                </div>
+
+                {/* Confidence progress bar */}
+                <div className="w-full bg-slate-200/80 rounded-full h-3.5 overflow-hidden mb-6">
+                  <div
+                    className="h-full rounded-full transition-all duration-1000 ease-out"
+                    style={{
+                      width: `${results.predictions[0].confidence}%`,
+                      background: "linear-gradient(90deg, #03045e, #0096c7)",
+                    }}
+                  />
+                </div>
+
+                {/* Instructions Box */}
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center gap-4">
+                  <span className="text-3xl shrink-0">💡</span>
+                  <div className="text-xs sm:text-sm text-slate-600 leading-relaxed font-medium">
+                    <strong>Instructions:</strong> Please proceed to{" "}
+                    <span className="font-extrabold text-[#0077b6]">
+                      {assignedRoomLive
+                        ? `Room #${assignedRoomLive.placeCode}`
+                        : results.matchedClass
+                        ? `Room #${results.matchedClass.placeCode}`
+                        : "the designated waiting area"}
+                    </span>{" "}
+                    and show your Token <strong className="text-[#03045e] font-black">#{tokenNumber || "001"}</strong> to the attending nurse or doctor.
+                  </div>
+                </div>
               </div>
             </div>
 
             {/* RESTART BUTTON */}
-            <button onClick={restart}
-              className="mt-4 mx-auto btn-outline flex items-center justify-center gap-3 text-2xl font-bold py-6 px-12 rounded-2xl hover:bg-slate-50 transition-colors">
+            <button
+              onClick={restart}
+              className="mt-2 mx-auto btn-outline flex items-center justify-center gap-3 text-lg sm:text-xl font-bold py-4 px-10 rounded-2xl hover:bg-slate-50 transition-colors shadow-sm"
+            >
               <FaRedo /> Start New Assessment
             </button>
 

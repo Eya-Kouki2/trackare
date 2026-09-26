@@ -1,6 +1,6 @@
 import api from "../../api/axios";
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { useOutletContext, Link } from "react-router-dom";
+import { useOutletContext, Link, useNavigate } from "react-router-dom";
 import {
   FaUsers, FaUserMd, FaExclamationTriangle, FaCog,
   FaCheckCircle, FaPlus, FaClipboardList,
@@ -130,8 +130,10 @@ const LineChart = ({ data, color = "#3b82f6", height = 180 }) => {
 /* ─── Main Component ───────────────────────────────────────── */
 const AdminHome = () => {
   const { user } = useOutletContext();
+  const navigate = useNavigate();
   const [patients, setPatients] = useState([]);
   const [diseaseClasses, setDiseaseClasses] = useState([]);
+  const [activeSessions, setActiveSessions] = useState([]);
   const [showClassesModal, setShowClassesModal] = useState(false);
   const [selectedClassForPatients, setSelectedClassForPatients] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -145,8 +147,21 @@ const AdminHome = () => {
     });
   }, [patients]);
 
+  const getActiveTokensInClass = useCallback((placeCode, roomDbId) => {
+    return activeSessions.filter((session) => {
+      const room = session.assignedRoom || session.suggestedClass;
+      if (!room) return false;
+      const sessionRoomId = room._id || room.diseaseClassId;
+      const sessionPlaceCode = room.placeCode;
+      return (
+        (sessionRoomId && String(sessionRoomId) === String(roomDbId)) ||
+        (sessionPlaceCode && Number(sessionPlaceCode) === Number(placeCode))
+      );
+    });
+  }, [activeSessions]);
+
   const area = user?.area;
-  const basePath = user?.role === "nurses" ? "/nurse" : "/admin";
+  const basePath = user?.role === "admin" ? "/admin" : "/nurse";
 
   useEffect(() => {
     const loadDashboard = async () => {
@@ -155,12 +170,15 @@ const AdminHome = () => {
         return;
       }
       try {
-        const [patientsRes, classesRes] = await Promise.all([
+        const areaId = user.area?._id || user.area;
+        const [patientsRes, classesRes, sessionsRes] = await Promise.all([
           api.get("/api/patients/stats"),
-          api.get("/api/disease-classes")
+          api.get("/api/disease-classes"),
+          api.get(`/api/triage-sessions/active?areaId=${areaId}`).catch(() => ({ data: { sessions: [] } }))
         ]);
         setPatients(patientsRes.data.patients || []);
         setDiseaseClasses(classesRes.data.diseaseClasses || []);
+        setActiveSessions(sessionsRes.data?.sessions || []);
       } catch (error) {
         console.error("Failed to load dashboard data", error);
       } finally {
@@ -170,12 +188,35 @@ const AdminHome = () => {
 
     loadDashboard();
 
-    // Poll every 10 seconds to keep room capacities live
-    const interval = setInterval(loadDashboard, 10000);
+    // Fast poll every 2.5 seconds + window event listener
+    const interval = setInterval(loadDashboard, 2500);
     window.addEventListener("alerts-updated", loadDashboard);
+
+    // SSE listener for instant cross-browser updates
+    const isDev = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    const sseUrl = isDev ? "http://localhost:5000/api/result/stream" : "/api/result/stream";
+    const sse = new EventSource(sseUrl);
+
+    sse.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (
+          data.type === "TOKEN_CREATED" ||
+          data.type === "WAITING_PATIENT_ASSIGNED" ||
+          data.type === "CAPACITY_OVERFLOW_ALERT" ||
+          data.type === "CONSULTATION_COMPLETED"
+        ) {
+          loadDashboard();
+        }
+      } catch (err) {
+        console.error("SSE parse error in AdminHome:", err);
+      }
+    };
+
     return () => {
       clearInterval(interval);
       window.removeEventListener("alerts-updated", loadDashboard);
+      sse.close();
     };
   }, [user?.area]);
 
@@ -285,13 +326,38 @@ const AdminHome = () => {
     };
   }, [patients, diseaseClasses]);
 
-  const fullRooms = useMemo(() => {
-    return diseaseClasses.filter((room) => {
-      const officialPatients = getPatientsInClass(room.placeCode).length;
-      const kioskPatients = room.currentPatients || 0;
-      return (officialPatients + kioskPatients) >= (room.maxPatients || 1);
+  const totalAlerts = useMemo(() => {
+    // 1. Group rooms by sickness: only alert when ALL rooms for a sickness are at capacity
+    const sicknessMap = {};
+    diseaseClasses.forEach((room) => {
+      if (!room.maladie) return;
+      const key = room.maladie.toLowerCase();
+      if (!sicknessMap[key]) sicknessMap[key] = [];
+      sicknessMap[key].push(room);
     });
-  }, [diseaseClasses, getPatientsInClass]);
+
+    let overflowCount = 0;
+    Object.keys(sicknessMap).forEach((maladieKey) => {
+      const rooms = sicknessMap[maladieKey];
+      if (!rooms || rooms.length === 0) return;
+      const allFull = rooms.every((r) => {
+        const active = r.currentPatients || 0;
+        return active > 0 && active >= (r.maxPatients || 1);
+      });
+      if (allFull) overflowCount++;
+    });
+
+    // 2. Waiting buffer tokens
+    const waitingCount = activeSessions.filter((s) => s.status === "waiting_room").length;
+
+    // 3. Unhandled sickness alerts
+    const storedNoRoom = JSON.parse(localStorage.getItem("noRoomAlerts") || "[]");
+    const activeNoRoom = storedNoRoom.filter((alert) => {
+      return !diseaseClasses.some((c) => (c.maladie || "").toLowerCase() === (alert.maladie || "").toLowerCase());
+    });
+
+    return overflowCount + waitingCount + activeNoRoom.length;
+  }, [diseaseClasses, activeSessions]);
 
   if (!area) {
     return (
@@ -313,12 +379,12 @@ const AdminHome = () => {
           <p className="text-xs text-slate-500 font-medium">Welcome back, Admin! Here&apos;s what&apos;s happening today.</p>
         </div>
         <div className="flex items-stretch gap-3">
-          <Link to="/admin/alerts" className={`relative flex items-center justify-center gap-2 px-5 h-12 border rounded-xl transition-all shadow-sm font-bold text-sm ${fullRooms.length > 0 ? 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
-            <FaExclamationTriangle className={fullRooms.length > 0 ? "text-red-600 animate-pulse" : "text-slate-400"} />
+          <Link to={`${basePath}/alerts`} className={`relative flex items-center justify-center gap-2 px-5 h-12 border rounded-xl transition-all shadow-sm font-bold text-sm ${totalAlerts > 0 ? 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
+            <FaExclamationTriangle className={totalAlerts > 0 ? "text-red-600 animate-pulse" : "text-slate-400"} />
             Alerts
-            {fullRooms.length > 0 && (
+            {totalAlerts > 0 && (
               <span className="absolute -top-2 -right-2 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-white font-black text-xs ring-[3px] ring-white shadow-sm">
-                {fullRooms.length}
+                {totalAlerts}
               </span>
             )}
           </Link>
@@ -590,6 +656,13 @@ const AdminHome = () => {
                           </div>
                           
                           <div className="flex items-center justify-between text-xs border-b border-slate-100/60 pb-1.5">
+                            <span className="font-semibold text-slate-400 text-[10px]">Doctor</span>
+                            <span className="font-bold text-teal-700 flex items-center gap-1 text-[11px] truncate max-w-[130px]">
+                              👨‍⚕️ {item.doctorId?.name ? `Dr. ${item.doctorId.name}` : <span className="text-slate-400 italic font-normal">Unassigned</span>}
+                            </span>
+                          </div>
+                          
+                          <div className="flex items-center justify-between text-xs border-b border-slate-100/60 pb-1.5">
                             <span className="font-semibold text-slate-400 text-[10px]">Occupancy</span>
                             <span className="font-bold text-slate-700 text-[11px]">
                               {totalPatients} / {item.maxPatients || 1} 
@@ -692,20 +765,24 @@ const AdminHome = () => {
               {diseaseClasses.length > 0 ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {diseaseClasses.map((item) => {
-                    const officialPatients = getPatientsInClass(item.placeCode).length;
-                    const kioskPatients = item.currentPatients || 0;
-                    const totalPatients = officialPatients + kioskPatients;
-                    const isFull = totalPatients >= (item.maxPatients || 1);
+                    const activePatients = item.currentPatients || 0;
+                    const maxCapacity = item.maxPatients || 1;
+                    const isFull = activePatients > 0 && activePatients >= maxCapacity;
                     
                     return (
                       <div
                         key={item._id}
-                        onClick={() => setSelectedClassForPatients(item)}
-                        className={`p-4 rounded-xl bg-white border ${isFull ? 'border-red-200' : 'border-slate-100'} shadow-sm flex flex-col gap-3 cursor-pointer hover:border-health-blue/30 hover:shadow-md transition-all relative overflow-hidden`}
+                        onClick={() => {
+                          setShowClassesModal(false);
+                          navigate(`${basePath}/patients`);
+                        }}
+                        className={`p-4 rounded-xl bg-white border ${isFull ? 'border-red-200' : 'border-slate-100'} shadow-sm flex flex-col gap-3 cursor-pointer hover:border-health-blue/50 hover:shadow-md transition-all relative overflow-hidden group`}
                       >
                         {isFull && <div className="absolute top-0 left-0 w-1 h-full bg-red-500"></div>}
                         <div className="flex items-center justify-between">
-                          <h3 className="font-black text-health-navy text-sm">Room #{item.placeCode}</h3>
+                          <h3 className="font-black text-health-navy text-sm group-hover:text-health-blue transition-colors">
+                            Room #{item.placeCode}
+                          </h3>
                           <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-2 py-0.5 rounded-full ml-auto ${item.severity === 'critical' ? 'bg-red-50 text-red-600 border border-red-100' :
                             item.severity === 'high' ? 'bg-orange-50 text-orange-600 border border-orange-100' :
                               item.severity === 'moderate' ? 'bg-amber-50 text-amber-600 border border-amber-100' :
@@ -731,9 +808,9 @@ const AdminHome = () => {
                           <div className="flex items-center justify-between text-xs border-b border-slate-100/60 pb-2">
                             <span className="font-semibold text-slate-400 text-[11px]">Occupancy</span>
                             <span className="font-bold text-slate-700">
-                              {totalPatients} / {item.maxPatients || 1} 
+                              {activePatients} / {maxCapacity} 
                               <span className="text-[9px] text-slate-400 ml-1 font-medium">
-                                ({kioskPatients} waiting)
+                                ({activePatients} active)
                               </span>
                             </span>
                           </div>
@@ -751,11 +828,11 @@ const AdminHome = () => {
                             )}
                           </div>
                         </div>
-                        {item.description && (
-                          <p className="text-[10px] text-slate-500 mt-1 line-clamp-2 px-1 pt-1.5 border-t border-dashed border-slate-100">
-                            {item.description}
-                          </p>
-                        )}
+
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-health-blue">
+                          <span>View Room Queue</span>
+                          <FaChevronRight className="text-[10px] transform group-hover:translate-x-0.5 transition-transform" />
+                        </div>
                       </div>
                     );
                   })}
@@ -768,10 +845,20 @@ const AdminHome = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 border-t border-slate-100 bg-white flex justify-end">
+            <div className="p-4 border-t border-slate-100 bg-white flex items-center justify-between gap-3">
+              <button
+                onClick={() => {
+                  setShowClassesModal(false);
+                  navigate(`${basePath}/patients`);
+                }}
+                className="px-4 py-2 bg-health-blue hover:bg-health-sky text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5"
+              >
+                <FaUsers /> Open Patients &amp; Room Queue
+              </button>
+
               <button
                 onClick={() => setShowClassesModal(false)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] rounded-xl transition-colors"
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors"
               >
                 Close View
               </button>
@@ -790,8 +877,13 @@ const AdminHome = () => {
                 <h3 className="text-base font-black text-health-navy tracking-tight flex items-center gap-2">
                   <FaUsers className="text-health-blue" /> Cohort Patients
                 </h3>
-                <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                  Class: <span className="font-bold text-slate-700">{selectedClassForPatients.name}</span> (Room #{selectedClassForPatients.placeCode})
+                <p className="text-[11px] text-slate-500 font-medium mt-0.5 flex items-center gap-2 flex-wrap">
+                  <span>Room #{selectedClassForPatients.placeCode} · {getMaladieLabel(selectedClassForPatients.maladie)}</span>
+                  {selectedClassForPatients.doctorId?.name && (
+                    <span className="font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200">
+                      👨‍⚕️ Dr. {selectedClassForPatients.doctorId.name}
+                    </span>
+                  )}
                 </p>
               </div>
               <button
@@ -803,43 +895,82 @@ const AdminHome = () => {
             </div>
 
             {/* Modal Content */}
-            <div className="p-5 overflow-y-auto space-y-3 bg-slate-50/30">
+            <div className="p-5 overflow-y-auto bg-slate-50/30">
               {(() => {
-                const list = getPatientsInClass(selectedClassForPatients.placeCode);
-                if (list.length === 0) {
+                const activeTokens = getActiveTokensInClass(
+                  selectedClassForPatients.placeCode,
+                  selectedClassForPatients._id
+                );
+
+                if (activeTokens.length === 0) {
                   return (
-                    <div className="py-12 text-center text-slate-400 text-xs bg-white rounded-xl border border-slate-100 p-6">
-                      No patients are currently assigned to this room cohort.
+                    <div className="py-14 text-center bg-white rounded-2xl border border-slate-100">
+                      <p className="text-3xl mb-2">📋</p>
+                      <p className="text-sm font-bold text-slate-600">No Active Tokens</p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        No patients are currently assigned to Room #{selectedClassForPatients.placeCode}.
+                      </p>
                     </div>
                   );
                 }
-                return list.map((p) => {
-                  const sortedHistory = [...p.history].sort((a, b) => new Date(b.date) - new Date(a.date));
-                  const latest = sortedHistory[0];
-                  return (
-                    <div key={p._id} className="p-3.5 rounded-xl bg-white border border-slate-100 shadow-sm flex items-center justify-between hover:border-health-blue/10 transition-colors">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-health-ice text-health-blue flex items-center justify-center font-bold text-xs">
-                          {getInitials(p.name)}
-                        </div>
-                        <div>
-                          <p className="text-xs font-bold text-health-navy">{p.name}</p>
-                          <p className="text-[9px] font-medium text-slate-400 mt-0.5">CIN: {p.cin}</p>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <span className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${latest?.triage?.priority?.includes("High") || latest?.triage?.priority?.includes("Critical") ? "bg-red-50 text-red-600" :
-                          latest?.triage?.priority?.includes("Moderate") ? "bg-amber-50 text-amber-600" : "bg-emerald-50 text-emerald-600"
-                          }`}>
-                          {latest?.triage?.priority?.split(' ')[0]}
-                        </span>
-                        <p className="text-[9px] text-slate-400 font-medium mt-1">
-                          Assigned: {latest ? new Date(latest.date).toLocaleDateString() : '—'}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                });
+
+                return (
+                  <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-sm">
+                    <table className="w-full text-left border-collapse bg-white">
+                      <thead>
+                        <tr className="bg-gradient-to-r from-[#03045e] to-[#0077b6] text-white text-[10px] font-black uppercase tracking-wider">
+                          <th className="p-3.5 rounded-tl-2xl">#</th>
+                          <th className="p-3.5">Token</th>
+                          <th className="p-3.5">Priority</th>
+                          <th className="p-3.5 rounded-tr-2xl">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs font-medium">
+                        {activeTokens.map((token, idx) => {
+                          const priority = token.priority || token.prediction?.priority || "GREEN";
+                          const rawStatus = token.status;
+                          const statusText =
+                            rawStatus === "in_consultation"
+                              ? "In Consultation"
+                              : rawStatus === "completed"
+                              ? "Completed"
+                              : "Assigned";
+
+                          return (
+                            <tr key={token._id} className="hover:bg-slate-50/80 transition-colors">
+                              <td className="p-3.5 font-bold text-slate-400">{idx + 1}</td>
+                              <td className="p-3.5 font-black text-[#03045e] text-sm">
+                                🎫 #{token.tokenNumber}
+                              </td>
+                              <td className="p-3.5">
+                                <span className={`px-2.5 py-1 rounded-md text-[10px] font-extrabold uppercase tracking-wider ${
+                                  priority === "RED" || priority === "CRITICAL" || priority === "HIGH"
+                                    ? "bg-red-100 text-red-700 border border-red-200"
+                                    : priority === "ORANGE" || priority === "MODERATE"
+                                    ? "bg-amber-100 text-amber-700 border border-amber-200"
+                                    : "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                                }`}>
+                                  {priority}
+                                </span>
+                              </td>
+                              <td className="p-3.5">
+                                <span className={`px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${
+                                  rawStatus === "in_consultation"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : rawStatus === "completed"
+                                    ? "bg-purple-100 text-purple-800"
+                                    : "bg-emerald-100 text-emerald-800"
+                                }`}>
+                                  ● {statusText}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
               })()}
             </div>
 

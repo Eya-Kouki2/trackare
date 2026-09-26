@@ -21,6 +21,9 @@ import Profile from "../pages/admin/Profile";
 import DiseaseClasses from "../pages/admin/DiseaseClasses";
 import DetectSickness from "../pages/admin/DetectSickness";
 import Alerts from "../pages/admin/Alerts";
+import MedicinesList from "../pages/admin/MedicinesList";
+import DispensingQueue from "../pages/admin/DispensingQueue";
+import StaffList from "../pages/admin/StaffList";
 
 const AppRoutes = () => (
   <Routes>
@@ -38,6 +41,8 @@ const AppRoutes = () => (
       <Route path="triage" element={<Triage />} />
       <Route path="detect-sickness" element={<DetectSickness />} />
       <Route path="pharmacy" element={<PharmacyMonitor />} />
+      <Route path="dispensing" element={<DispensingQueue />} />
+      <Route path="medicines" element={<MedicinesList />} />
       <Route path="disease-classes" element={<DiseaseClasses />} />
       <Route path="analytics" element={<Analytics />} />
       <Route path="reports" element={<Reports />} />
@@ -45,6 +50,7 @@ const AppRoutes = () => (
       <Route path="settings" element={<Settings />} />
       <Route path="profile" element={<Profile />} />
       <Route path="alerts" element={<Alerts />} />
+      <Route path="staff" element={<StaffList />} />
     </Route>
 
     {/* ── Nurse Routes ── */}
@@ -54,6 +60,9 @@ const AppRoutes = () => (
       <Route path="triage" element={<Triage />} />
       <Route path="detect-sickness" element={<DetectSickness />} />
       <Route path="pharmacy" element={<PharmacyMonitor />} />
+      <Route path="dispensing" element={<DispensingQueue />} />
+      <Route path="medicines" element={<MedicinesList />} />
+      <Route path="alerts" element={<Alerts />} />
       <Route path="profile" element={<Profile />} />
     </Route>
 

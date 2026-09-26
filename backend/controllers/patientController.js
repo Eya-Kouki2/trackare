@@ -1,4 +1,5 @@
 const Patient = require('../models/patientModel');
+const Encounter = require('../models/encounterModel');
 const { isMongoConnectionError, mongoConnectionMessage } = require('../utils/mongoError');
 
 const formatPatientList = (patient) => ({
@@ -59,7 +60,36 @@ const getPatient = async (req, res) => {
             });
         }
 
-        res.status(200).json({ success: true, patient });
+        // Fetch all past encounters for this patient
+        const encounters = await Encounter.find({ patientId: patient._id }).sort({ startedAt: -1 });
+
+        // Map encounters to structured history entries
+        const encounterEntries = encounters.map(enc => ({
+            _id: enc._id,
+            date: enc.endedAt || enc.startedAt || enc.createdAt,
+            type: 'visit',
+            title: `Consultation (${enc.tokenNumber ? `Token #${enc.tokenNumber}` : 'Kiosk'}) — ${enc.consultation?.confirmedDiagnosis || enc.triageData?.aiPrediction?.label || 'General'}`,
+            notes: enc.consultation?.clinicalNotes || enc.consultation?.confirmedDiagnosis || (enc.triageData?.symptoms?.length ? `Reported Symptoms: ${enc.triageData.symptoms.join(', ')}` : `Status: ${enc.status}`),
+            triage: {
+                vitals: enc.triageData?.vitals || {},
+                symptoms: enc.triageData?.symptoms || [],
+                predictions: enc.triageData?.aiPrediction ? [enc.triageData.aiPrediction] : [],
+                priority: enc.triageData?.priority || 'GREEN',
+                suggestedClass: enc.triageData?.suggestedClass || undefined,
+            },
+            prescriptions: enc.consultation?.prescriptions || [],
+            status: enc.status,
+        }));
+
+        const existingDates = new Set((patient.history || []).map(h => new Date(h.date).getTime()));
+        const uniqueEncounters = encounterEntries.filter(e => !existingDates.has(new Date(e.date).getTime()));
+
+        const mergedHistory = [...(patient.history || []), ...uniqueEncounters].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        const patientObj = patient.toObject ? patient.toObject() : { ...patient };
+        patientObj.history = mergedHistory;
+
+        res.status(200).json({ success: true, patient: patientObj, encounters });
     } catch (error) {
         console.error('Error in getPatient', error);
         if (isMongoConnectionError(error)) {
@@ -384,9 +414,77 @@ const getPatientsWithStats = async (req, res) => {
     }
 };
 
+/* Search patients by CIN substring or name for autocomplete */
+const searchPatients = async (req, res) => {
+    try {
+        if (!req.userAreaId) {
+            return res.status(400).json({ success: false, message: 'No area linked to this account' });
+        }
+        const { query = '' } = req.query;
+        const trimmed = query.trim();
+
+        if (!trimmed) {
+            return res.json({ success: true, patients: [] });
+        }
+
+        const Encounter = require('../models/encounterModel');
+        const patients = await Patient.find({
+            areaId: req.userAreaId,
+            isActive: true,
+            $or: [
+                { cin: { $regex: trimmed, $options: 'i' } },
+                { name: { $regex: trimmed, $options: 'i' } },
+            ],
+        }).limit(10);
+
+        res.json({ success: true, patients });
+    } catch (error) {
+        console.error('Error in searchPatients', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+/* Get patient by exact CIN with all their past Encounters */
+const getPatientByCin = async (req, res) => {
+    try {
+        if (!req.userAreaId) {
+            return res.status(400).json({ success: false, message: 'No area linked to this account' });
+        }
+        const { cin } = req.params;
+        const normalizedCin = cin.trim().toUpperCase();
+
+        const Encounter = require('../models/encounterModel');
+        const patient = await Patient.findOne({
+            cin: normalizedCin,
+            areaId: req.userAreaId,
+            isActive: true,
+        });
+
+        if (!patient) {
+            return res.json({ success: true, exists: false, patient: null, encounters: [] });
+        }
+
+        const encounters = await Encounter.find({
+            patientId: patient._id,
+        }).sort({ startedAt: -1 });
+
+        res.json({
+            success: true,
+            exists: true,
+            patient,
+            encounters,
+        });
+    } catch (error) {
+        console.error('Error in getPatientByCin', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
 module.exports = {
     getPatients,
     getPatient,
+    searchPatients,
+    getPatientByCin,
     createPatient,
     updatePatient,
     addPatientHistory,

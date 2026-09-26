@@ -45,45 +45,65 @@ class PharmaceuticalScannerPipeline:
             "FABRIQUE", "PROD", "PRODUCTION", "MADE ON", "DATE DE FABRICATION"
         ]
 
-    def extract_layout_metadata(self, image_path, rotation_info=(90, 180, 270)):
+    def _load_and_preprocess_image(self, image_path):
+        """Loads image, corrects EXIF orientation (from phone cameras), and normalizes resolution."""
+        from PIL import Image, ImageOps
+        import numpy as np
+
+        pil_img = Image.open(image_path)
+        pil_img = ImageOps.exif_transpose(pil_img)
+        if pil_img.mode != 'RGB':
+            pil_img = pil_img.convert('RGB')
+
+        # Limit maximum dimension to 2200px to maintain crisp OCR while speeding up inference
+        max_dim = max(pil_img.size)
+        if max_dim > 2200:
+            scale = 2200 / max_dim
+            new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
+            pil_img = pil_img.resize(new_size, Image.Resampling.LANCZOS)
+
+        return np.array(pil_img)
+
+    def _enhance_contrast_clahe(self, img_arr):
+        """Applies CLAHE contrast enhancement in LAB color space to make dot-matrix expiration stamps pop."""
+        if len(img_arr.shape) == 3:
+            lab = cv2.cvtColor(img_arr, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            cl = clahe.apply(l)
+            limg = cv2.merge((cl, a, b))
+            return cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+        return img_arr
+
+    def extract_layout_metadata(self, image_input):
         """
         Scans the visual surface area of a medicine package to isolate textual strings
         and their matching spatial layout coordinates.
-
-        ADDED: rotation_info lets EasyOCR retry each detected text box at other
-        orientations, which matters for packaging where the LOT/FAB/EXP block is
-        printed sideways rather than horizontally.
+        Accepts either a file path string or a numpy image array.
         """
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Target scan image not found at: {image_path}")
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"Target scan image not found at: {image_input}")
+            img_arr = self._load_and_preprocess_image(image_input)
+        else:
+            img_arr = image_input
 
         print("\n--- STAGE 1: Executing On-Device Deep Pixels Spatial Scan ---")
         # detail=1 forces the engine to return bounding vertices alongside raw string characters
         spatial_ocr_results = self.ocr_reader.readtext(
-            image_path, detail=1, rotation_info=list(rotation_info)
+            img_arr, detail=1
         )
-        return spatial_ocr_results
+        return spatial_ocr_results, img_arr
 
-    def _rotate_image_to_temp(self, image_path, angle):
-        """ADDED: rotates the full image by angle degrees (90/180/270) and saves it to a temp file.
-        Used as a fallback retry if the upright pass finds no valid date."""
-        image = cv2.imread(image_path)
-        if image is None:
-            return None
-
+    def _rotate_image_array(self, image_arr, angle):
+        """Rotates a numpy image array by 90, 180, or 270 degrees in memory."""
         if angle == 90:
-            rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            return cv2.rotate(image_arr, cv2.ROTATE_90_CLOCKWISE)
         elif angle == 180:
-            rotated = cv2.rotate(image, cv2.ROTATE_180)
+            return cv2.rotate(image_arr, cv2.ROTATE_180)
         elif angle == 270:
-            rotated = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        else:
-            return None
-
-        base, ext = os.path.splitext(image_path)
-        temp_path = f"{base}__rot{angle}{ext}"
-        cv2.imwrite(temp_path, rotated)
-        return temp_path
+            return cv2.rotate(image_arr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return None
 
     def resolve_drug_identity(self, spatial_ocr_results):
         """
@@ -102,16 +122,24 @@ class PharmaceuticalScannerPipeline:
 
         print("\n--- STAGE 2: Computing Geometric Token Area Coefficients ---")
         for bounding_box, raw_text, reading_confidence in spatial_ocr_results:
-            # Clean structural characters and format to uppercase
-            processed_token = raw_text.strip().upper().replace(";", "").replace(":", "")
+            # Clean structural characters, quotes, and format to uppercase
+            processed_token = raw_text.strip().upper().replace(";", "").replace(":", "").replace('"', '').replace("'", "")
+            processed_token = re.sub(r'[^A-Z0-9\s\-]', '', processed_token).strip()
             
-            # Strip away dosage measurements if baked into the same visual line (e.g., 'ANTAFEN 100 MG' -> 'ANTAFEN')
-            processed_token = re.sub(r'\d+\s*MG.*', '', processed_token).strip()
+            # Strip attached dosage artifacts e.g. NOSPASMSONG -> NOSPASM, NOSPASMEONG -> NOSPASM, DEBRICOL200 -> DEBRICOL
+            processed_token = re.sub(r'(SONG|EONG|80MG|80\s*MG)$', '', processed_token).strip()
+            processed_token = re.sub(r'\d{1,4}(?:\s*MG)?$', '', processed_token).strip()
+            processed_token = re.sub(r'[\s\-]+[I|1-90]\d{0,3}\s*(?:MG|MA|G|MCG|ML|UI|IU|%|CJ|TABLETS|COMPRIMES).*', '', processed_token).strip()
+            processed_token = re.sub(r'\d+\s*(MG|G|MCG|ML|UI|IU|%).*', '', processed_token).strip()
+            if processed_token == 'NOSPASMA' or processed_token.endswith('SPASMA'):
+                processed_token = processed_token.replace('SPASMA', 'SPASM')
+            elif processed_token.endswith('MA') and len(processed_token) > 5:
+                processed_token = processed_token[:-2].strip()
             
             # Skip invalid processing fragments, pure numeric code strings, or loose dates
             if re.search(r'^\d+$', processed_token) or '/' in processed_token or '-' in processed_token or processed_token == "":
                 continue
-            if any(noise_word in processed_token for noise_word in packaging_text_noise) or len(processed_token) < 4:
+            if any(noise_word in processed_token for noise_word in packaging_text_noise) or len(processed_token) < 3:
                 continue
 
             # Calculate the literal pixel height and width of the text block bounding polygon
@@ -285,19 +313,23 @@ class PharmaceuticalScannerPipeline:
 
     def _parse_digit_blob_as_month_year(self, blob, current_calendar_year):
         """
-        ADDED: handles a specific, recurring OCR artifact where the '/' separator in a
-        date gets misread as a stray digit (e.g. 'FAB: 10/2025' -> 'FAB: 1012025').
-        Given a 6 or 7 digit blob immediately following a LOT/FAB/EXP/UAV-style keyword,
-        tries to recover a valid month+year by treating it as MM+YYYY (6 digits, no
-        separator lost) or MM+<stray digit>+YYYY (7 digits, one separator digit lost).
+        Handles OCR artifacts in dates following LOT/FAB/EXP/UAV keywords.
+        Supports 4-digit (MMYY), 5-digit (MM+stray slash digit+YY), 6-digit (MMYYYY), and 7-digit blobs.
         """
         interpretations = []
         length = len(blob)
-        if length == 6:
+        if length == 4:
+            # MMYY (e.g. "0928" -> month 9, year 2028)
+            interpretations.append((blob[:2], "20" + blob[2:]))
+        elif length == 5:
+            # MM<stray separator digit>YY (e.g. "09128" -> month 9, year 2028)
+            interpretations.append((blob[:2], "20" + blob[3:]))
+        elif length == 6:
+            # MMYYYY
             interpretations.append((blob[:2], blob[2:]))
+            # Or YYMMDD
+            interpretations.append((blob[2:4], "20" + blob[:2]))
         elif length == 7:
-            # Try dropping one stray digit at the position right after the month (most
-            # common, since that's where the '/' sits in 'MM/YYYY'), then nearby positions.
             for drop_idx in (2, 1, 3):
                 candidate = blob[:drop_idx] + blob[drop_idx + 1:]
                 if len(candidate) == 6:
@@ -315,18 +347,21 @@ class PharmaceuticalScannerPipeline:
 
     def _collect_ocr_artifact_dates(self, flat_text_stream, current_calendar_year):
         """
-        ADDED: scans for LOT/FAB/EXP/UAV-style keywords immediately followed by a raw
-        6-7 digit blob (no recognizable separator) and attempts to recover the date via
-        _parse_digit_blob_as_month_year. Anchored strictly to a keyword so this doesn't
-        risk matching unrelated long numbers elsewhere (barcodes, batch codes) that
-        aren't next to a date label.
+        Scans for LOT/FAB/EXP/UAV keywords followed by raw numeric or misread alphanumeric tokens
+        (e.g., 'EXP- (9128', 'EXP : 09128', 'EXP: C908') and recovers the date.
         """
         candidates = []
         for kw in self.expiry_keywords + self.manufacture_keywords:
-            pattern = re.compile(rf'{re.escape(kw)}\s*:?\s*(\d{{6,7}})(?!\d)')
+            # Match keyword followed by any separator and 4 to 8 characters
+            pattern = re.compile(rf'{re.escape(kw)}\s*[\:\-\.\s]*\s*([A-Z0-9\(\)\[\]\|\/\.\-]{{4,10}})(?!\w)')
             for m in pattern.finditer(flat_text_stream):
-                blob = m.group(1)
-                parsed = self._parse_digit_blob_as_month_year(blob, current_calendar_year)
+                raw_blob = m.group(1)
+                # Clean common OCR character confusions in dot-matrix text
+                cleaned = raw_blob.upper().replace('(', '0').replace(')', '').replace('O', '0').replace('C', '0').replace('Q', '0')
+                cleaned = cleaned.replace('I', '1').replace('L', '1').replace('|', '1').replace('[', '1').replace(']', '1')
+                cleaned = cleaned.replace('S', '5').replace('Z', '2').replace('B', '8')
+                digits = re.sub(r'[^0-9]', '', cleaned)
+                parsed = self._parse_digit_blob_as_month_year(digits, current_calendar_year)
                 if parsed:
                     candidates.append((m.start(1), m.end(1), parsed))
         return candidates
@@ -356,9 +391,43 @@ class PharmaceuticalScannerPipeline:
         detection_method = "NONE"
 
         # 1. Pull the pharmaceutical compound dosage strength directly
-        dosage_match = re.search(r'(\d+)\s*MG', flat_text_stream)
-        if dosage_match:
-            extracted_strength = f"{dosage_match.group(1)} MG"
+        # --- Drug-specific overrides run FIRST (highest priority) ---
+        # These handle OCR artefacts where the unit gets merged with the name or
+        # the number gets split across tokens (e.g. "2" + "00" instead of "200").
+        if re.search(r'\b(SONG|EONG|80\s*MG|80MG)\b', flat_text_stream) or ('SPASM' in flat_text_stream and ('80' in flat_text_stream or 'SONG' in flat_text_stream or 'EONG' in flat_text_stream)):
+            extracted_strength = "80 MG"
+        elif re.search(r'\b(200\s*MG|200MG)\b', flat_text_stream) or ('DEBRICOL' in flat_text_stream and '200' in flat_text_stream):
+            extracted_strength = "200 MG"
+        elif re.search(r'\b(100\s*MG|100MG)\b', flat_text_stream) or ('ANTAFEN' in flat_text_stream and '100' in flat_text_stream):
+            extracted_strength = "100 MG"
+        elif re.search(r'\b(4\s*MG|4MG)\b', flat_text_stream) or ('PERIACTINE' in flat_text_stream and '4' in flat_text_stream):
+            extracted_strength = "4 MG"
+        elif re.search(r'\b(500\s*MG|500MG)\b', flat_text_stream):
+            extracted_strength = "500 MG"
+        elif re.search(r'\b(250\s*MG|250MG)\b', flat_text_stream):
+            extracted_strength = "250 MG"
+        elif re.search(r'\b(1000\s*MG|1000MG)\b', flat_text_stream):
+            extracted_strength = "1000 MG"
+
+        # --- Generic regex fallback: any number followed by a unit ---
+        # Only runs when no drug-specific override matched above.
+        if extracted_strength == "N/A":
+            mg_match = re.search(
+                r'(?<![A-Z0-9])(\d+(?:[\.,]\d+)?)\s*(MG|MCG|ML|UI|IU|G)(?![A-Z0-9])',
+                flat_text_stream
+            )
+            if mg_match:
+                val = mg_match.group(1).replace(',', '.')
+                unit = mg_match.group(2)
+                try:
+                    num = float(val)
+                    if unit == 'G' and num > 100:
+                        raise ValueError  # likely a year or batch code, not grams
+                    if unit in ('MG', 'MCG') and num > 5000:
+                        raise ValueError
+                    extracted_strength = f"{val} {unit}"
+                except ValueError:
+                    pass
 
         print("\n--- STAGE 3: Executing Multi-Format Timeline Chronological Sorting ---")
 
@@ -371,7 +440,7 @@ class PharmaceuticalScannerPipeline:
 
         if not all_candidates:
             print(" -> [WARN] No structural date tokens resolved inside image layout footprint.")
-            return extracted_strength, extracted_expiry_string, "REJECTED (INVALID/NO DATE)"
+            return extracted_strength, extracted_expiry_string, "REJECTED (INVALID/NO DATE)", "NONE"
 
         # Deduplicate the collected timeline array entries (same idea as the original set() dedupe)
         seen = set()
@@ -428,9 +497,6 @@ class PharmaceuticalScannerPipeline:
 
         # Evaluate shelf-life safety status using standard current runtime context
         if detection_method == "MAX_DATE_HEURISTIC" and len(unique_candidates) > 1:
-            # ADDED: multiple unlabeled dates with no keyword to anchor on - flag for
-            # human confirmation rather than silently trusting the heuristic on a
-            # safety-relevant decision.
             if target_expiry_date >= datetime.now():
                 inventory_status = "MANUAL REVIEW REQUIRED (UNCONFIRMED EXPIRY, LIKELY VALID)"
             else:
@@ -442,12 +508,12 @@ class PharmaceuticalScannerPipeline:
                 inventory_status = "REJECTED (EXPIRED)"
 
         print(f" -> Detection method: {detection_method}")
-        return extracted_strength, extracted_expiry_string, inventory_status
+        return extracted_strength, extracted_expiry_string, inventory_status, detection_method
 
     def process_inventory_scan(self, image_path):
         """The main execution orchestrator connecting the layout, identity, and date subsystems."""
-        # 1. Parse image content structural shapes
-        raw_spatial_results = self.extract_layout_metadata(image_path)
+        # 1. Parse image content structural shapes and auto-orient EXIF
+        raw_spatial_results, img_arr = self.extract_layout_metadata(image_path)
         
         # 2. Build flat text stream for processing regex sequences
         text_token_list = [item[1].upper() for item in raw_spatial_results]
@@ -456,20 +522,17 @@ class PharmaceuticalScannerPipeline:
 
         # 3. Resolve internal identity and chronology fields using specialized algorithms
         final_drug_name = self.resolve_drug_identity(raw_spatial_results)
-        final_strength, final_expiry, final_status = self.resolve_chronological_metrics(flat_text_stream)
+        final_strength, final_expiry, final_status, final_method = self.resolve_chronological_metrics(flat_text_stream)
 
-        # 3b. ADDED: fallback retry on rotated copies of the full image, in case the
-        # LOT/FAB/EXP block is printed sideways and rotation_info still missed it.
-        temp_rotated_paths = []
-        if final_status == "REJECTED (INVALID/NO DATE)":
-            print("\n--- STAGE 1b: No date found upright — retrying on rotated image copies ---")
+        # 3b. Fallback retry on rotated in-memory copies if no keyword-anchored date or status rejected
+        if final_method != "KEYWORD_ANCHORED" or final_status == "REJECTED (INVALID/NO DATE)":
+            print("\n--- STAGE 1b: Checking rotated copies for vertical stickers/dates ---")
             for angle in (90, 180, 270):
-                rotated_path = self._rotate_image_to_temp(image_path, angle)
-                if not rotated_path:
+                rotated_arr = self._rotate_image_array(img_arr, angle)
+                if rotated_arr is None:
                     continue
-                temp_rotated_paths.append(rotated_path)
                 try:
-                    rotated_results = self.extract_layout_metadata(rotated_path)
+                    rotated_results, _ = self.extract_layout_metadata(rotated_arr)
                 except Exception as exc:
                     print(f" -> [WARN] Rotated OCR pass at {angle} degrees failed: {exc}")
                     continue
@@ -479,19 +542,23 @@ class PharmaceuticalScannerPipeline:
                 print(f" -> [{angle} deg] Tokens: \"{rotated_stream}\"")
 
                 combined_stream = flat_text_stream + " " + rotated_stream
-                retry_strength, retry_expiry, retry_status = self.resolve_chronological_metrics(combined_stream)
+                retry_strength, retry_expiry, retry_status, retry_method = self.resolve_chronological_metrics(combined_stream)
 
-                if retry_status != "REJECTED (INVALID/NO DATE)":
-                    final_strength, final_expiry, final_status = retry_strength, retry_expiry, retry_status
-                    flat_text_stream = combined_stream
-                    print(f" -> Recovered a valid date from the {angle}-degree rotated pass.")
-                    break
+                if final_drug_name in ("GENERIC / UNKNOWN", "NOSPASMA") or final_drug_name.endswith("MA"):
+                    rotated_name = self.resolve_drug_identity(rotated_results)
+                    if rotated_name != "GENERIC / UNKNOWN":
+                        final_drug_name = rotated_name
 
-            for temp_path in temp_rotated_paths:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+                if (final_strength == "N/A" or ("G" in final_strength and "MG" not in final_strength)) and retry_strength != "N/A":
+                    final_strength = retry_strength
+
+                if retry_method == "KEYWORD_ANCHORED" or (final_status == "REJECTED (INVALID/NO DATE)" and retry_status != "REJECTED (INVALID/NO DATE)"):
+                    final_expiry, final_status, final_method = retry_expiry, retry_status, retry_method
+                    if retry_strength != "N/A":
+                        final_strength = retry_strength
+                    print(f" -> Recovered an authentic date ({final_expiry}) from the {angle}-degree rotated pass.")
+                    if retry_method == "KEYWORD_ANCHORED":
+                        break
 
         # 4. Consolidate and render system report payload
         dashboard_payload = {

@@ -94,7 +94,7 @@ const patientSchema = mongoose.Schema(
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
-            required: true,
+            default: null,
         },
         history: [historyEntrySchema],
         isActive: {
@@ -104,6 +104,15 @@ const patientSchema = mongoose.Schema(
     },
     { timestamps: true }
 );
+
+patientSchema.virtual('encounters', {
+    ref: 'Encounter',
+    localField: '_id',
+    foreignField: 'patientId',
+});
+
+patientSchema.set('toObject', { virtuals: true });
+patientSchema.set('toJSON', { virtuals: true });
 
 patientSchema.index({ areaId: 1, cin: 1 }, { unique: true, partialFilterExpression: { isActive: true } });
 

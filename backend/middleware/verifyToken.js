@@ -4,7 +4,12 @@ const { isMongoConnectionError, mongoConnectionMessage } = require('../utils/mon
 
 const verifyToken = async (req, res, next) => {
 
-    const token = req.cookies.token;
+    let token = req.cookies.token;
+
+    // Also support Authorization: Bearer <token> header for multi-session / API testing
+    if (!token && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+        token = req.headers.authorization.split(' ')[1];
+    }
 
     if (!token) {
         return res.status(401).json({

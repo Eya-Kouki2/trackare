@@ -9,8 +9,10 @@ const ALL_NAV_ITEMS = [
   { key: "patients", label: "Patients", icon: "👥", adminOnly: false },
   { key: "detect-sickness", label: "Detect sickness", icon: "🧬", adminOnly: false },
   { key: "pharmacy", label: "Pharmacy Monitor", icon: "💊", adminOnly: false },
+  { key: "dispensing", label: "Dispensing Queue", icon: "🧾", adminOnly: false },
   { key: "disease-classes", label: "Disease Rooms", icon: "🏥", adminOnly: true },
-  { key: "alerts", label: "Alerts", icon: "🚨", adminOnly: true },
+  { key: "alerts", label: "Alerts", icon: "🚨", adminOnly: false },
+  { key: "staff", label: "Hospital Staff", icon: "🩺", adminOnly: true },
   { key: "reports", label: "Reports", icon: "📜", adminOnly: true },
   { key: "profile", label: "Profile", icon: "👤", adminOnly: false },
 ];
@@ -19,31 +21,52 @@ const Sidebar = ({ user, onLogout, role = "admin" }) => {
   const [copied, setCopied] = useState(false);
   const [alertCount, setAlertCount] = useState(0);
   const areaCode = user?.area?.code;
-  const base = role === "nurses" ? "/nurse" : "/admin";
+  const base = (role === "admin" && user?.role === "admin") ? "/admin" : "/nurse";
 
   useEffect(() => {
     if (!areaCode) return;
     const fetchAlerts = async () => {
       try {
-        const [patientsRes, classesRes] = await Promise.all([
-          api.get("/api/patients/stats"),
-          api.get("/api/disease-classes")
+        const areaId = user?.area?._id || user?.area;
+        const [classesRes, sessionsRes] = await Promise.all([
+          api.get("/api/disease-classes"),
+          api.get(`/api/triage-sessions/active?areaId=${areaId}`).catch(() => ({ data: { sessions: [] } }))
         ]);
-        const patients = patientsRes.data.patients || [];
         const classes = classesRes.data.diseaseClasses || [];
-        
-        let count = 0;
-        classes.forEach(room => {
-          const official = patients.filter((p) => {
-            if (!p.history || p.history.length === 0) return false;
-            const sortedHistory = [...p.history].sort((a, b) => new Date(b.date) - new Date(a.date));
-            const latestTriage = sortedHistory[0]?.triage;
-            return latestTriage?.suggestedClass?.placeCode === Number(room.placeCode);
-          }).length;
-          const kiosk = room.currentPatients || 0;
-          if (official + kiosk >= (room.maxPatients || 1)) count++;
+        const sessions = sessionsRes.data?.sessions || [];
+        const waitingTokens = sessions.filter((s) => s.status === "waiting_room");
+
+        // Group rooms by sickness: only alert when ALL rooms for a sickness are at capacity
+        const sicknessMap = {};
+        classes.forEach((room) => {
+          if (!room.maladie) return;
+          const key = room.maladie.toLowerCase();
+          if (!sicknessMap[key]) sicknessMap[key] = [];
+          sicknessMap[key].push(room);
         });
-        setAlertCount(count + (JSON.parse(localStorage.getItem("noRoomAlerts") || "[]")).length);
+
+        let overflowCount = 0;
+        Object.keys(sicknessMap).forEach((maladieKey) => {
+          const rooms = sicknessMap[maladieKey];
+          if (!rooms || rooms.length === 0) return;
+          const allFull = rooms.every((r) => {
+            const active = r.currentPatients || 0;
+            return active > 0 && active >= (r.maxPatients || 1);
+          });
+          if (allFull) overflowCount++;
+        });
+
+        // Filter out any stale noRoomAlerts that now have an active room
+        const storedNoRoom = JSON.parse(localStorage.getItem("noRoomAlerts") || "[]");
+        const activeNoRoom = storedNoRoom.filter((alert) => {
+          return !classes.some((c) => (c.maladie || "").toLowerCase() === (alert.maladie || "").toLowerCase());
+        });
+        if (activeNoRoom.length !== storedNoRoom.length) {
+          localStorage.setItem("noRoomAlerts", JSON.stringify(activeNoRoom));
+        }
+
+        const total = overflowCount + waitingTokens.length + activeNoRoom.length;
+        setAlertCount(total);
       } catch {
         // ignore errors silently
       }
@@ -87,7 +110,15 @@ const Sidebar = ({ user, onLogout, role = "admin" }) => {
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot shrink-0" />
               <p className="text-[10px] text-blue-200/80 font-medium">
-                {role === "nurses" ? "Nurse Portal" : "Clinical Platform"}
+                {user?.role === "admin"
+                  ? "Admin Platform"
+                  : user?.role === "doctor" || user?.role === "doctors"
+                    ? "Doctor Portal"
+                    : user?.role === "triage"
+                      ? "Triage Portal"
+                      : user?.role === "pharmacy"
+                        ? "Pharmacy Portal"
+                        : "Nurse Portal"}
               </p>
             </div>
           </div>
@@ -95,15 +126,17 @@ const Sidebar = ({ user, onLogout, role = "admin" }) => {
       </div>
 
       {/* ── Role badge ──────────────────────────── */}
-      {role === "nurses" && (
+      {user?.role !== "admin" && (
         <div className="mx-3 mt-3 px-3 py-2 rounded-xl bg-white/10 border border-white/15">
           <p className="text-[9px] font-bold uppercase tracking-widest text-blue-200/70">Role</p>
-          <p className="text-xs font-bold text-health-cyan mt-0.5">Nurse</p>
+          <p className="text-xs font-bold text-health-cyan mt-0.5 capitalize">
+            {user?.role === "nurses" ? "Nurse" : user?.role || "Staff"}
+          </p>
         </div>
       )}
 
       {/* ── Area code badge ────────────────────── */}
-      {role === "admin" && areaCode && (
+      {user?.role === "admin" && areaCode && (
         <div className="mx-3 mt-3 px-3 py-2.5 rounded-xl bg-white/10 border border-white/15">
           <p className="text-[9px] font-bold uppercase tracking-widest text-blue-200/70 mb-1">Area Code</p>
           <div className="flex items-center justify-between gap-2">

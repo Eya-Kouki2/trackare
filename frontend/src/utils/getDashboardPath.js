@@ -1,8 +1,6 @@
 export const getDashboardPath = (role) => {
   if (role === "admin") return "/admin";
-  if (role === "nurses") return "/nurse";
-  if (role === "triage") return "/triage";
-  if (role === "pharmacy") return "/pharmacy";
+  if (["nurses", "nurse", "doctor", "doctors", "triage", "pharmacy"].includes(role)) return "/nurse";
   return "/login";
 };
 

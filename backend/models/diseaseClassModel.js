@@ -24,6 +24,11 @@ const diseaseClassSchema = mongoose.Schema(
             enum: ['low', 'moderate', 'high', 'critical'],
             default: 'moderate',
         },
+        doctorId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
         maxPatients: {
             type: Number,
             required: true,

@@ -1,5 +1,6 @@
 const express = require('express');
 const { redisPublisher, redisSubscriber, KIOSK_CHANNEL } = require('../config/redis');
+const { setLocalBroadcaster } = require('../utils/broadcaster');
 const router = express.Router();
 
 // Store connected SSE clients local to this Node instance
@@ -15,6 +16,8 @@ const broadcastLocal = (dataString) => {
         }
     });
 };
+
+setLocalBroadcaster(broadcastLocal);
 
 // ── Redis Subscriber: Listen for messages from ANY backend instance ──
 redisSubscriber.subscribe(KIOSK_CHANNEL, (err, count) => {

@@ -3,16 +3,22 @@ module.exports = {
     {
       name: 'trackare-backend',
       script: './backend/server.js',
-      instances: 'max', // Or set a specific number like 2
-      exec_mode: 'cluster',
+      instances: 1,
+      exec_mode: 'fork',
       env: {
         NODE_ENV: 'development',
       },
-      env_production: {
-        NODE_ENV: 'production',
-      },
       watch: false,
       max_memory_restart: '500M',
+    },
+    {
+      name: 'trackare-iot',
+      script: './backend/ml/iot/pc_server.py',
+      interpreter: './backend/ml/.venv/Scripts/python.exe',
+      instances: 1,
+      exec_mode: 'fork',
+      watch: false,
+      max_memory_restart: '1G',
     },
   ],
 };

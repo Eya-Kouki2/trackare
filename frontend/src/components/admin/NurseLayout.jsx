@@ -11,7 +11,8 @@ const NurseLayout = () => {
   const refreshUser = useCallback(async () => {
     try {
       const response = await api.get("/api/auth/check-auth");
-      if (response.data.user.role !== "nurses") {
+      const validStaffRoles = ["nurses", "nurse", "doctor", "doctors", "triage", "pharmacy"];
+      if (!validStaffRoles.includes(response.data?.user?.role)) {
         navigate("/login");
         return;
       }

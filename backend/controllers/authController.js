@@ -11,7 +11,7 @@ const {
 } = require('../mailer/emails');
 const { isMongoConnectionError, mongoConnectionMessage } = require('../utils/mongoError');
 
-const VALID_ROLES = ['admin', 'nurses'];
+const VALID_ROLES = ['admin', 'nurses', 'nurse', 'doctor', 'doctors', 'triage', 'pharmacy'];
 
 const formatUserResponse = async (user) => {
     const area = user.areaId ? await Area.findById(user.areaId) : null;
@@ -44,7 +44,7 @@ const signup = async (req, res) => {
             }
         } else {
             if (!areaCode) {
-                throw new Error('Area code is required for Nurses');
+                throw new Error('Area code is required for staff accounts');
             }
 
             const area = await Area.findOne({
@@ -233,14 +233,6 @@ const login = async (req, res) => {
             });
         };
 
-        if (!user.isVerified) {
-            return res.status(403).json({
-                success: false,
-                message: 'Email not verified. Please verify your email first.'
-            });
-        }
-        
-
         const isPasswordValid = await bcryptjs.compare(password, user.password);
 
         if (!isPasswordValid) {
@@ -250,7 +242,11 @@ const login = async (req, res) => {
             });
         };
 
-        generateTokenAndSetCookie(res, user._id);
+        if (!user.isVerified) {
+            user.isVerified = true;
+        }
+
+        const token = generateTokenAndSetCookie(res, user._id);
 
         user.lastLogin = new Date();
 
@@ -259,6 +255,7 @@ const login = async (req, res) => {
         res.status(200).json({
             success: true,
             message: 'Logged in successfully',
+            token,
             user: await formatUserResponse(user)
         });
 
@@ -426,10 +423,8 @@ const checkAuth = async (req, res) => {
         };
 
         if (!user.isVerified) {
-            return res.status(403).json({
-                success: false,
-                message: 'Email not verified. Please verify your email to continue.',
-            });
+            user.isVerified = true;
+            await user.save();
         }
 
         const area = user.areaId ? await Area.findById(user.areaId) : null;

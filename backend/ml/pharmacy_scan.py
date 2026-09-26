@@ -24,9 +24,9 @@ if not os.path.exists(image_path):
 import io, contextlib
 
 try:
-    # Add the ml/ directory to sys.path so ai_pipeline is importable
+    # Add the ml/ directory to sys.path so ai_pipeline2 is importable
     sys.path.insert(0, os.path.dirname(__file__))
-    from ai_pipeline import PharmaceuticalScannerPipeline
+    from ai_pipeline2 import PharmaceuticalScannerPipeline
 
     # Redirect stdout so pipeline print() calls don't pollute JSON output
     pipeline = PharmaceuticalScannerPipeline()
@@ -35,10 +35,13 @@ try:
         result = pipeline.process_inventory_scan(image_path)
 
     print(json.dumps({
+        "is_medicine":      result.get("is_medicine", False),
         "drug_name":        result.get("drug_name", "UNKNOWN"),
         "strength":         result.get("strength", "N/A"),
         "expiry_date":      result.get("expiry_date", "UNKNOWN"),
         "inventory_status": result.get("inventory_status", "UNKNOWN"),
+        "confidence":       result.get("confidence", "HIGH"),
+        "verification":     result.get("verification", {})
     }))
 
 except Exception as exc:

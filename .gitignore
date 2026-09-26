@@ -1,12 +1,35 @@
+# Dependencies
 node_modules/
 frontend/node_modules/
+package-lock.json
+
+# Build outputs
 dist/
 frontend/dist/
+build/
+
+# Environment and secrets
 .env
-.DS_Store
-*.log
+.env.local
+.env.*.local
 !.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# Python cache & virtual environments
 __pycache__/
+*.py[cod]
+*$py.class
 *.pyc
 .venv/
+venv/
+backend/ml/iot/venv/
+
+# Uploads and temporary media
 backend/ml/uploads/
+backend/ml/uploads/medicine/
+backend/uploads/
+uploads/

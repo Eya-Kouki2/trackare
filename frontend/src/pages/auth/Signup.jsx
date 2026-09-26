@@ -9,7 +9,10 @@ import PasswordInput from "../../components/auth/PasswordInput";
 
 const ROLES = [
   { value: "admin", label: "Admin" },
-  { value: "nurses", label: "Nurses" },
+  { value: "doctor", label: "Doctor" },
+  { value: "nurses", label: "Nurse" },
+  { value: "triage", label: "Triage" },
+  { value: "pharmacy", label: "Pharmacy" },
 ];
 
 const Signup = () => {
@@ -40,7 +43,7 @@ const Signup = () => {
     if (!data.password) return "Password is required.";
     if (data.password.length < 6) return "Password must be at least 6 characters.";
     if (data.password !== data.confirmPassword) return "Passwords do not match.";
-    if (data.role !== "admin" && !data.areaCode.trim()) return "Area code is required for Nurses.";
+    if (data.role !== "admin" && !data.areaCode.trim()) return "Area code is required for staff accounts.";
     return null;
   };
 

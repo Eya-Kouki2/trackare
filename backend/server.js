@@ -9,6 +9,8 @@ const patientRouter = require('./routes/patientRoutes');
 const mlRouter = require('./routes/mlRoutes');
 const pharmacyRouter = require('./routes/pharmacyRoutes');
 const kioskRouter = require('./routes/kioskRoutes');
+const triageSessionRouter = require('./routes/triageSessionRoutes');
+const scanQueueRouter = require('./routes/scanQueueRoutes');
 const cors = require('cors');
 
 dotenv.config();
@@ -42,6 +44,9 @@ app.use('/api/patients', patientRouter)
 app.use('/api/ml', mlRouter)
 app.use('/api/pharmacy', pharmacyRouter)
 app.use('/api/result', kioskRouter)
+app.use('/api/triage-sessions', triageSessionRouter)
+app.use('/api/scan-queue', scanQueueRouter)
+app.use('/internal/scan-queue', scanQueueRouter)
 
 app.listen(port, () => {
     connectDB()

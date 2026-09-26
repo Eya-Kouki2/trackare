@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const MedicationSchema = new mongoose.Schema({
+    areaId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Area',
+        required: true,
+        index: true,
+    },
     drug_name: {
         type: String,
         required: true,

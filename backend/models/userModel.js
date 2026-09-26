@@ -27,12 +27,17 @@ const userShema = mongoose.Schema({
     verificationTokenExpiresAt : Date,
     role: {
         type: String,
-        enum: ['admin', 'nurses', 'triage', 'pharmacy'],
+        enum: ['admin', 'nurses', 'nurse', 'doctor', 'doctors', 'triage', 'pharmacy'],
         required: true,
     },
     areaId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Area',
+        default: null,
+    },
+    assignedRoom: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'DiseaseClass',
         default: null,
     },
     profilePicture: {

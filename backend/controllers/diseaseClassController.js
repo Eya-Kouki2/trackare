@@ -1,6 +1,8 @@
 const DiseaseClass = require('../models/diseaseClassModel');
+const User = require('../models/userModel');
 const { MALADIE_VALUES } = require('../constants/maladies');
 const { isMongoConnectionError, mongoConnectionMessage } = require('../utils/mongoError');
+const { autoAssignWaitingPatients } = require('../services/queueService');
 
 const MIN_PLACE_CODE = 1;
 const MAX_PLACE_CODE = 200;
@@ -61,7 +63,9 @@ const getDiseaseClasses = async (req, res) => {
         const diseaseClasses = await DiseaseClass.find({
             areaId: req.userAreaId,
             isActive: true,
-        }).sort({ placeCode: 1 });
+        })
+            .populate('doctorId', 'name email role profilePicture lastLogin isVerified')
+            .sort({ placeCode: 1 });
 
         res.status(200).json({
             success: true,
@@ -80,7 +84,7 @@ const getDiseaseClasses = async (req, res) => {
 };
 
 const createDiseaseClass = async (req, res) => {
-    const { placeCode, description, severity, maladie, maxPatients } = req.body;
+    const { placeCode, description, maladie, maxPatients, doctorId } = req.body;
 
     try {
         if (!req.userAreaId) {
@@ -89,7 +93,6 @@ const createDiseaseClass = async (req, res) => {
                 message: 'Complete clinic setup before adding disease classes',
             });
         }
-
 
         if (!maladie || !MALADIE_VALUES.includes(maladie)) {
             return res.status(400).json({
@@ -114,21 +117,45 @@ const createDiseaseClass = async (req, res) => {
         });
         const classNumber = existingCount + 1;
 
+        let validDoctorId = null;
+        if (doctorId) {
+            const doctor = await User.findOne({
+                _id: doctorId,
+                areaId: req.userAreaId,
+                role: { $in: ['doctor', 'doctors'] },
+            });
+            if (doctor) {
+                validDoctorId = doctor._id;
+            }
+        }
+
         const diseaseClass = await DiseaseClass.create({
             classNumber,
             placeCode: resolvedPlaceCode,
             description: description?.trim() || '',
-            severity: severity || 'moderate',
             maladie,
+            doctorId: validDoctorId,
             maxPatients: maxPatients ? Number(maxPatients) : 1,
             areaId: req.userAreaId,
             createdBy: req.userID,
         });
 
+        // If doctor was assigned, sync user's assignedRoom
+        if (validDoctorId) {
+            await User.findByIdAndUpdate(validDoctorId, { assignedRoom: diseaseClass._id });
+        }
+
+        // Automatically assign any waiting patients for this disease to the new room
+        const promotedPatients = await autoAssignWaitingPatients(req.userAreaId, maladie);
+
+        const freshDiseaseClass = await DiseaseClass.findById(diseaseClass._id)
+            .populate('doctorId', 'name email role profilePicture lastLogin isVerified');
+
         res.status(201).json({
             success: true,
             message: 'Disease class created',
-            diseaseClass,
+            diseaseClass: freshDiseaseClass || diseaseClass,
+            promotedPatientsCount: promotedPatients.length,
         });
     } catch (error) {
         console.error('Error in createDiseaseClass', error);
@@ -150,7 +177,7 @@ const createDiseaseClass = async (req, res) => {
 
 const updateDiseaseClass = async (req, res) => {
     const { id } = req.params;
-    const { placeCode, description, severity, maladie, maxPatients } = req.body;
+    const { placeCode, description, maladie, maxPatients, doctorId } = req.body;
 
     try {
         const diseaseClass = await DiseaseClass.findOne({
@@ -166,9 +193,7 @@ const updateDiseaseClass = async (req, res) => {
             });
         }
 
-
         if (description !== undefined) diseaseClass.description = description.trim();
-        if (severity) diseaseClass.severity = severity;
         if (maladie) {
             if (!MALADIE_VALUES.includes(maladie)) {
                 return res.status(400).json({
@@ -179,6 +204,31 @@ const updateDiseaseClass = async (req, res) => {
             diseaseClass.maladie = maladie;
         }
         if (maxPatients !== undefined) diseaseClass.maxPatients = Number(maxPatients);
+
+        if (doctorId !== undefined) {
+            const oldDoctorId = diseaseClass.doctorId;
+            if (!doctorId) {
+                // Clear doctor assignment
+                if (oldDoctorId) {
+                    await User.findByIdAndUpdate(oldDoctorId, { assignedRoom: null });
+                }
+                diseaseClass.doctorId = null;
+            } else {
+                const doctor = await User.findOne({
+                    _id: doctorId,
+                    areaId: req.userAreaId,
+                    role: { $in: ['doctor', 'doctors'] },
+                });
+                if (!doctor) {
+                    return res.status(400).json({ success: false, message: 'Invalid doctor selected for this hospital area' });
+                }
+                if (oldDoctorId && String(oldDoctorId) !== String(doctor._id)) {
+                    await User.findByIdAndUpdate(oldDoctorId, { assignedRoom: null });
+                }
+                diseaseClass.doctorId = doctor._id;
+                await User.findByIdAndUpdate(doctor._id, { assignedRoom: diseaseClass._id });
+            }
+        }
 
         if (placeCode !== undefined && placeCode !== null && placeCode !== '') {
             if (parsePlaceCode(placeCode) === null) {
@@ -192,10 +242,18 @@ const updateDiseaseClass = async (req, res) => {
 
         await diseaseClass.save();
 
+        // If maxPatients changed, try to promote waiting patients
+        if (maxPatients !== undefined) {
+            await autoAssignWaitingPatients(req.userAreaId, diseaseClass.maladie);
+        }
+
+        const fresh = await DiseaseClass.findById(diseaseClass._id)
+            .populate('doctorId', 'name email role profilePicture lastLogin isVerified');
+
         res.status(200).json({
             success: true,
             message: 'Disease class updated',
-            diseaseClass,
+            diseaseClass: fresh || diseaseClass,
         });
     } catch (error) {
         console.error('Error in updateDiseaseClass', error);
@@ -227,6 +285,10 @@ const deleteDiseaseClass = async (req, res) => {
                 success: false,
                 message: 'Disease class not found',
             });
+        }
+
+        if (diseaseClass.doctorId) {
+            await User.findByIdAndUpdate(diseaseClass.doctorId, { assignedRoom: null });
         }
 
         res.status(200).json({
